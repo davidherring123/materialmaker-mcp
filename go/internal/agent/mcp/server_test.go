@@ -4,6 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+"encoding/base64"
+"image"
+"image/color"
+"image/png"
+"os"
+"path/filepath"
+"github.com/davidherring123/materialmaker-mcp/go/internal/adapter/materialmaker"
 	"github.com/davidherring123/materialmaker-mcp/go/internal/app"
 	"github.com/davidherring123/materialmaker-mcp/go/internal/core/material"
 	"strings"
@@ -39,7 +46,7 @@ func TestInitializeToolsAndNoNotificationReply(t *testing.T) {
 	}
 	var list map[string]any
 	_ = json.Unmarshal([]byte(lines[1]), &list)
-	if n := len(list["result"].(map[string]any)["tools"].([]any)); n != 7 {
+	if n := len(list["result"].(map[string]any)["tools"].([]any)); n != 8 {
 		t.Fatalf("wrong number of tools: %d", n)
 	}
 	var called map[string]any
@@ -54,4 +61,25 @@ func TestUnknownToolIsJSONRPCError(t *testing.T) {
 	if r.Error == nil || r.Error.Code != -32602 {
 		t.Fatalf("unexpected unknown tool response: %+v", r)
 	}
+}
+
+func TestPreviewToolResultContainsSavedPathAndImage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "preview.png")
+	f, err := os.Create(path)
+	if err != nil { t.Fatal(err) }
+	img := image.NewRGBA(image.Rect(0,0,2,2))
+	img.Set(0,0,color.RGBA{R:20,A:255})
+	if err := png.Encode(f,img); err != nil { t.Fatal(err) }
+	if err := f.Close(); err != nil { t.Fatal(err) }
+	result := toolResult(materialmaker.PreviewResult{Name:"stone",ImagePath:path},nil).(map[string]any)
+	if result["isError"] != false { t.Fatal(result) }
+	content := result["content"].([]any)
+	if len(content)!=2 { t.Fatalf("expected text and image, got %d",len(content)) }
+	attached := content[1].(map[string]any)
+	if attached["type"]!="image" || attached["mimeType"]!="image/png" { t.Fatal(attached) }
+	decoded, err := base64.StdEncoding.DecodeString(attached["data"].(string))
+	if err != nil { t.Fatal(err) }
+	if _, err := png.Decode(bytes.NewReader(decoded)); err != nil { t.Fatal(err) }
+	structured := result["structuredContent"].(materialmaker.PreviewResult)
+	if structured.ImagePath != path { t.Fatal(structured) }
 }

@@ -26,12 +26,13 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	nodeDir := fs.String("nodes", "", "directory of Material Maker .mmg node definitions")
 	templates := fs.String("templates", "", "path to cookbook templates (optional)")
 	godot := fs.String("godot", "", "Godot executable used to run Material Maker's export CLI")
+    previewProject:=fs.String("preview-project","","trusted Godot preview rig directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return errors.New("expected: mcp | list | catalog [query] | inspect NAME | create NAME [CATEGORY TEMPLATE] | validate NAME | edit NAME OPS.json REVISION | render NAME [SIZE]")
+		return errors.New("expected: mcp | list | catalog [query] | inspect NAME | create NAME [CATEGORY TEMPLATE] | validate NAME | edit NAME OPS.json REVISION | render NAME [SIZE] | preview NAME [SIZE]")
 	}
 	w, err := material.OpenWorkspace(*workspace)
 	if err != nil {
@@ -48,7 +49,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return err
 		}
 	}
-	svc := &app.Service{Workspace: w, Catalog: cat, Templates: *templates, Renderer: &materialmaker.Renderer{Binary: *godot, Project: *mmProject}}
+	svc := &app.Service{Workspace: w, Catalog: cat, Templates: *templates, Renderer: &materialmaker.Renderer{Binary: *godot, Project: *mmProject, PreviewProject:*previewProject}}
 	printJSON := func(v any) error { return json.NewEncoder(stdout).Encode(v) }
 	argsRequired := func(n int) error {
 		if len(rest) < n {
@@ -122,6 +123,13 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return fmt.Errorf("%w (problems: %v)", e, p)
 		}
 		return printJSON(v)
+    case "preview":
+        if e:=argsRequired(2);e!=nil{return e}
+        size:=256
+        if len(rest)>2{var parseErr error;size,parseErr=strconv.Atoi(rest[2]);if parseErr!=nil{return parseErr}}
+        v,e:=svc.Preview(ctx,rest[1],size)
+        if e!=nil{return e}
+        return printJSON(v)
 	case "render":
 		if e := argsRequired(2); e != nil {
 			return e

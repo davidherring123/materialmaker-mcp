@@ -65,6 +65,14 @@ func (s *Service) Render(ctx context.Context, name string, size int) (materialma
 	}
 	return s.Renderer.Render(ctx, s.Workspace, name, size)
 }
+// Preview validates the saved graph, then generates a 3D screenshot.
+func (s *Service) Preview(ctx context.Context,name string,size int)(materialmaker.PreviewResult,error){
+    if s.Renderer==nil{return materialmaker.PreviewResult{},errors.New("renderer not configured")}
+    mat,err:=s.Inspect(name)
+    if err!=nil{return materialmaker.PreviewResult{},err}
+    if issues:=material.Validate(mat.Graph,s.Catalog);hasErrors(issues){return materialmaker.PreviewResult{},errors.New("graph validation failed; cannot preview")}
+    return s.Renderer.Preview(ctx,s.Workspace,name,size)
+}
 func hasErrors(problems []material.Problem) bool {
 	for _, p := range problems {
 		if p.Severity == "error" {

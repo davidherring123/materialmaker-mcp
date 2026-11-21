@@ -22,6 +22,8 @@ type Renderer struct {
 	Binary  string
 	Project string
 	Target  string
+	// PreviewProject points to the trusted repository preview rig, never an agent-provided path.
+	PreviewProject string
 	mu      sync.Mutex
 }
 type RenderResult struct {
@@ -31,9 +33,33 @@ type RenderResult struct {
 	Directory     string   `json:"directory"`
 }
 
+// PreviewResult returns a stable screenshot path and all resulting files.
+type PreviewResult struct {
+    Name string `json:"name"`
+    ImagePath string `json:"image_path"`
+    Directory string `json:"directory"`
+    Files []string `json:"files"`
+    RequestedSize int `json:"requested_size"`
+}
 func (r *Renderer) Render(ctx context.Context, workspace *material.Workspace, name string, size int) (RenderResult, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+    return r.render(ctx,workspace,name,size,nil)
+}
+// Preview renders fresh maps and a 3D screenshot in a private staging directory,
+// then publishes the complete result. Failed previews preserve previous output.
+func (r *Renderer) Preview(ctx context.Context, workspace *material.Workspace, name string, size int) (PreviewResult,error) {
+    var screenshot string
+    result,err:=r.render(ctx,workspace,name,size,func(stage string)(string,error){
+        file,err:=r.renderScreenshot(ctx,stage,name)
+        if err!=nil{return "",err}
+        screenshot=file
+        return file,nil
+    })
+    if err!=nil{return PreviewResult{},err}
+    return PreviewResult{Name:name,ImagePath:filepath.Join(result.Directory,screenshot),Directory:result.Directory,Files:result.Files,RequestedSize:size},nil
+}
+func (r *Renderer) render(ctx context.Context,workspace *material.Workspace,name string,size int,afterExport func(string)(string,error))(RenderResult,error){
+    r.mu.Lock()
+    defer r.mu.Unlock()
 	if size < 16 || size > 2048 {
 		return RenderResult{}, errors.New("size must be 16-2048")
 	}
@@ -107,6 +133,12 @@ func (r *Renderer) Render(ctx context.Context, workspace *material.Workspace, na
 	if !foundPNG {
 		return RenderResult{}, fmt.Errorf("export produced no PNG maps: %s", trimLog(out))
 	}
+    if afterExport!=nil {
+        extra,err:=afterExport(stage)
+        if err!=nil {return RenderResult{},err}
+        if extra!=filepath.Base(extra)||!strings.HasSuffix(extra,".png") {return RenderResult{},errors.New("invalid preview filename")}
+        files=append(files,extra)
+    }
 	// Back up old exports before publishing, and restore them if publication fails.
 	dest := filepath.Join(generated, name)
 	if err := material.ValidName(name); err != nil {
@@ -146,6 +178,44 @@ func (r *Renderer) Render(ctx context.Context, workspace *material.Workspace, na
 		paths[i] = filepath.Join(dest, f)
 	}
 	return RenderResult{Name: name, Files: paths, RequestedSize: size, Directory: dest}, nil
+}
+// renderScreenshot drives the existing Godot preview scene with staged PBR maps.
+func (r *Renderer) renderScreenshot(ctx context.Context,stage,name string)(string,error){
+    if r.PreviewProject=="" {return "",errors.New("preview requires --preview-project pointing to src/mm_mcp/preview_project")}
+    if _,err:=os.Stat(filepath.Join(r.PreviewProject,"project.godot"));err!=nil{return "",fmt.Errorf("preview project: %w",err)}
+    paths:=map[string]string{}
+    entries,err:=os.ReadDir(stage)
+    if err!=nil{return "",err}
+    for _,entry:=range entries {
+        if entry.IsDir()||entry.Type()&os.ModeSymlink!=0 {continue}
+        for _,kind:=range []string{"albedo","normal","orm"} {
+            if strings.HasSuffix(strings.ToLower(entry.Name()),"_"+kind+".png"){
+                if paths[kind]!="" {return "",fmt.Errorf("multiple %s maps",kind)}
+                paths[kind]=filepath.Join(stage,entry.Name())
+            }
+        }
+    }
+    for _,kind:=range []string{"albedo","normal","orm"} {
+        if paths[kind]=="" {return "",fmt.Errorf("preview requires a %s map",kind)}
+    }
+    file:=name+"_preview.png"
+    output:=filepath.Join(stage,file)
+    timeoutCtx,cancel:=context.WithTimeout(ctx,60*time.Second)
+    defer cancel()
+    cmd:=exec.CommandContext(timeoutCtx,r.Binary,"--path",r.PreviewProject,"--",
+      "--albedo="+paths["albedo"],"--normal="+paths["normal"],"--orm="+paths["orm"],"--out="+output)
+    log,err:=cmd.CombinedOutput()
+    if err!=nil{return "",fmt.Errorf("preview screenshot failed: %w: %s",err,trimLog(log))}
+    info,err:=os.Lstat(output)
+    if err!=nil{return "",fmt.Errorf("preview screenshot not written: %w",err)}
+    if !info.Mode().IsRegular(){return "",errors.New("preview screenshot must be a regular PNG")}
+    f,err:=os.Open(output)
+    if err!=nil{return "",err}
+    defer f.Close()
+    img,err:=png.Decode(f)
+    if err!=nil{return "",fmt.Errorf("invalid screenshot: %w",err)}
+    if img.Bounds().Dx()<1||img.Bounds().Dy()<1{return "",errors.New("empty screenshot")}
+    return file,nil
 }
 func trimLog(data []byte) string {
 	s := string(data)

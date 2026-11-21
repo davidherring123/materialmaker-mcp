@@ -6,12 +6,15 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
+	"github.com/davidherring123/materialmaker-mcp/go/internal/adapter/materialmaker"
 	"github.com/davidherring123/materialmaker-mcp/go/internal/app"
 	"github.com/davidherring123/materialmaker-mcp/go/internal/core/material"
 )
@@ -56,6 +59,7 @@ var toolset = []tool{
 	{"material_edit", "Atomically apply up to 100 deterministic graph edits, validate the result, then save once. No partial patches are published.", schema([]string{"name", "operations", "expected_revision"}, map[string]any{"name": simple("string"), "expected_revision": simple("string"), "operations": map[string]any{"type": "array", "minItems": 1, "maxItems": 100, "items": map[string]any{"type": "object"}}}), map[string]any{"destructiveHint": true}},
 	{"material_validate", "Validate a saved .ptex against the configured Material Maker node definitions.", schema([]string{"name"}, map[string]any{"name": simple("string")}), map[string]any{"readOnlyHint": true}},
 	{"material_render", "Export PBR maps using the configured local Material Maker/ Godot CLI. Publishing replaces the previous complete output only after validation.", schema([]string{"name", "size"}, map[string]any{"name": simple("string"), "size": map[string]any{"type": "integer", "minimum": 16, "maximum": 2048}}), map[string]any{"destructiveHint": true}},
+	{"material_preview", "Render a 3D screenshot using the current material and return a stable image path and inline PNG. Saves NAME_preview.png beside fresh generated maps.", schema([]string{"name"}, map[string]any{"name": simple("string"), "size": map[string]any{"type": "integer", "minimum": 16, "maximum": 2048}}), map[string]any{"destructiveHint": true}},
 }
 
 type Server struct{ Service *app.Service }
@@ -150,8 +154,17 @@ func toolResult(value any, err error) any {
 		result["content"] = []any{map[string]any{"type": "text", "text": e.Error()}}
 		return result
 	}
-	result["content"] = []any{map[string]any{"type": "text", "text": string(data)}}
-	result["structuredContent"] = value
+    content:=[]any{map[string]any{"type":"text","text":string(data)}}
+    if preview,ok:=value.(materialmaker.PreviewResult);ok {
+        // Inline images are capped at 8MiB; the path is always returned.
+        if info,e:=os.Stat(preview.ImagePath);e==nil&&info.Mode().IsRegular()&&info.Size()<=8<<20 {
+            if bytes,e:=os.ReadFile(preview.ImagePath);e==nil {
+                content=append(content,map[string]any{"type":"image","mimeType":"image/png","data":base64.StdEncoding.EncodeToString(bytes)})
+            }
+        }
+    }
+    result["content"]=content
+    result["structuredContent"] = value
 	return result
 }
 
@@ -197,6 +210,9 @@ func (s *Server) call(ctx context.Context, name string, raw json.RawMessage) (an
 		return s.Service.Validate(a.Name)
 	case "material_render":
 		return s.Service.Render(ctx, a.Name, a.Size)
+    case "material_preview":
+        if a.Size==0{a.Size=256}
+        return s.Service.Preview(ctx,a.Name,a.Size)
 	default:
 		return nil, fmt.Errorf("%w: %s", errUnknownTool, name)
 	}
