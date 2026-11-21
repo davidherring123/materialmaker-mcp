@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go for pinned golangci-lint
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+      - name: Install pinned golangci-lint
+        run: |
+          VERSION=$(cat .golangci-lint-version)
+          curl -sSfL https://golangci-lint.run/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" "$VERSION"
+      - name: Run formatting, vet, and static analyzers
+        run: make check
+
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run unit and contract tests
+        run: go test -timeout=2m -count=1 ./...
+      - name: Run race detector (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race -timeout=3m -count=1 ./...
+      - name: Build MCP
+        run: go build ./cmd/materialmaker-mcp
