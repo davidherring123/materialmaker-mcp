@@ -1,0 +1,11 @@
+{
+  "name": "stone",
+  "label": "Stone",
+  "nodes": [
+    {"name":"Material","type":"material","parameters":{"roughness":0.8}},
+    {"name":"StoneNoise","type":"noise","parameters":{"scale":4}}
+  ],
+  "connections": [
+    {"from":"StoneNoise","from_port":0,"to":"Material","to_port":0}
+  ]
+}

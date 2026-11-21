@@ -1,46 +1,18 @@
-# Secrets / config
+# Local configuration / credentials
 .env
 .mcp.json
-
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-
-# Render output / working files
-catalog/catalog.json
-output/
-*.tmp.ptex
-run.log
-
-# Disposable live-control overlay: ensure_overlay() copies the full Material
-# Maker checkout (~266 MB, incl. a nested .git) here on first live-control use.
-mm_live_overlay/
-
-# Cookbook authoring: the builders (quality/cookbook_*.py) write variants to
-# quality/authored/ and renders to quality/cookbook/; both regenerable.
-# quality/promote_cookbook.py copies locked variants into the tracked cookbook/.
-quality/authored/
-
-# Cookbook growth (informal, non-frozen extensions like the fabric cases):
-# same story, cookbook_fabrics.py regenerates the .ptex variants.
-quality/cookbook/
-
-# OS junk
+*.local.json
+# Go build artifacts
+/bin/
+/materialmaker-mcp
+/materialmaker-mcp.exe
+*.test
+*.out
+# Godot cache and local rendering
+.godot/
+/output/
+/tmp/
+# Misc
+.DS_Store
 Thumbs.db
 Desktop.ini
-.DS_Store
-
-# Local Godot binary copied for host-side play.bat rendering (large, not tracked)
-_godot/
-
-# Session scratch (SDD baselines, calibration renders)
-scratchpad/
-
-# Screenshot-proof captures (see user-level CLAUDE.md)
-.proof/
