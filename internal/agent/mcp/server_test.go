@@ -57,7 +57,7 @@ func TestInitializeToolsAndNoNotificationReply(t *testing.T) {
 }
 func TestUnknownToolIsJSONRPCError(t *testing.T) {
 	s := New(&app.Service{})
-	r := s.Handle(context.Background(), request{ID: json.RawMessage("42"), Method: "tools/call", Params: json.RawMessage(`{"name":"not_a_tool","arguments":{}}`)})
+	r := s.handle(context.Background(), request{ID: json.RawMessage("42"), Method: "tools/call", Params: json.RawMessage(`{"name":"not_a_tool","arguments":{}}`)})
 	if r.Error == nil || r.Error.Code != -32602 {
 		t.Fatalf("unexpected unknown tool response: %+v", r)
 	}

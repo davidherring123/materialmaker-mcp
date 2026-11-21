@@ -162,18 +162,15 @@ func writeAtomically(path string, graph Graph) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(f.Name())
+	defer func() { _ = os.Remove(f.Name()) }()
 	if err := f.Chmod(0o600); err != nil {
-		f.Close()
-		return err
+		return errors.Join(err, f.Close())
 	}
 	if _, err := f.Write(body); err != nil {
-		f.Close()
-		return err
+		return errors.Join(err, f.Close())
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
+		return errors.Join(err, f.Close())
 	}
 	if err := f.Close(); err != nil {
 		return err

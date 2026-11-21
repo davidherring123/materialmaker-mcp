@@ -45,7 +45,9 @@ func TestRenderSuccessAndFailedRenderPreservesPriorOutputs(t *testing.T) {
 	if err := png.Encode(f, img); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("FAKE_PNG", pngPath)
 	bin := filepath.Join(root, "fake-godot.sh")
 	script := `#!/bin/sh

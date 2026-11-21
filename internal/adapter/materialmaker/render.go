@@ -74,37 +74,65 @@ func (r *Renderer) Preview(ctx context.Context, workspace *material.Workspace, n
 func (r *Renderer) render(ctx context.Context, workspace *material.Workspace, name string, size int, afterExport func(string) (string, error)) (RenderResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if size < 16 || size > 2048 {
-		return RenderResult{}, errors.New("size must be 16-2048")
-	}
-	if r.Binary == "" || r.Project == "" {
-		return RenderResult{}, errors.New("Material Maker requires --godot and --material-maker-project")
-	}
-	if _, err := os.Stat(r.Binary); err != nil {
-		return RenderResult{}, fmt.Errorf("Godot binary: %w", err)
-	}
-	if _, err := os.Stat(filepath.Join(r.Project, "project.godot")); err != nil {
-		return RenderResult{}, fmt.Errorf("Material Maker checkout: %w", err)
-	}
-	input, err := workspace.SourcePath(name)
+	input, generated, err := r.prepareRender(workspace, name, size)
 	if err != nil {
-		return RenderResult{}, err
-	}
-	if _, err := os.Stat(input); err != nil {
-		return RenderResult{}, err
-	}
-	generated, err := workspace.GeneratedRoot()
-	if err != nil {
-		return RenderResult{}, err
-	}
-	if err := os.MkdirAll(generated, 0o755); err != nil {
 		return RenderResult{}, err
 	}
 	stage, err := os.MkdirTemp(generated, "."+name+"-render-")
 	if err != nil {
 		return RenderResult{}, err
 	}
-	defer os.RemoveAll(stage)
+	defer func() { _ = os.RemoveAll(stage) }()
+	output, err := r.exportMaps(ctx, input, stage, size)
+	if err != nil {
+		return RenderResult{}, err
+	}
+	files, err := collectRenderFiles(stage, size, output)
+	if err != nil {
+		return RenderResult{}, err
+	}
+	if afterExport != nil {
+		additional, err := afterExport(stage)
+		if err != nil {
+			return RenderResult{}, err
+		}
+		if additional != filepath.Base(additional) || !strings.HasSuffix(additional, ".png") {
+			return RenderResult{}, errors.New("invalid generated preview filename")
+		}
+		files = append(files, additional)
+	}
+	return publishRender(generated, stage, name, size, files)
+}
+func (r *Renderer) prepareRender(workspace *material.Workspace, name string, size int) (input, generated string, err error) {
+	if size < 16 || size > 2048 {
+		return "", "", errors.New("size must be 16-2048")
+	}
+	if r.Binary == "" || r.Project == "" {
+		return "", "", errors.New("material maker requires --godot and --material-maker-project")
+	}
+	if _, err := os.Stat(r.Binary); err != nil {
+		return "", "", fmt.Errorf("godot binary: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(r.Project, "project.godot")); err != nil {
+		return "", "", fmt.Errorf("material maker checkout: %w", err)
+	}
+	input, err = workspace.SourcePath(name)
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := os.Stat(input); err != nil {
+		return "", "", err
+	}
+	generated, err = workspace.GeneratedRoot()
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.MkdirAll(generated, 0o755); err != nil {
+		return "", "", err
+	}
+	return input, generated, nil
+}
+func (r *Renderer) exportMaps(ctx context.Context, input, stage string, size int) ([]byte, error) {
 	target := r.Target
 	if target == "" {
 		target = "Godot/Godot 4 Standard"
@@ -114,55 +142,60 @@ func (r *Renderer) render(ctx context.Context, workspace *material.Workspace, na
 	cmd := exec.CommandContext(timeoutCtx, r.Binary, "--path", r.Project, "--export-material", input, "--target", target, "-o", stage, "--size", fmt.Sprint(size))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return RenderResult{}, fmt.Errorf("render failed: %w: %s", err, trimLog(out))
+		return nil, fmt.Errorf("render failed: %w: %s", err, trimLog(out))
 	}
+	return out, nil
+}
+func collectRenderFiles(stage string, size int, output []byte) ([]string, error) {
 	entries, err := os.ReadDir(stage)
 	if err != nil {
-		return RenderResult{}, err
+		return nil, err
 	}
 	files := []string{}
 	foundPNG := false
 	for _, entry := range entries {
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-			return RenderResult{}, errors.New("unexpected file type in render output")
+			return nil, errors.New("unexpected file type in render output")
 		}
-		path := filepath.Join(stage, entry.Name())
-		if strings.EqualFold(filepath.Ext(path), ".png") {
-			f, err := os.Open(path)
-			if err != nil {
-				return RenderResult{}, err
-			}
-			cfg, decodeErr := png.DecodeConfig(f)
-			f.Close()
-			if decodeErr != nil || cfg.Width <= 0 || cfg.Height <= 0 {
-				return RenderResult{}, fmt.Errorf("invalid PNG %q", entry.Name())
-			}
-			if cfg.Width != size || cfg.Height != size {
-				return RenderResult{}, fmt.Errorf("%s is %dx%d, expected %dx%d; this Material Maker version may ignore --size", entry.Name(), cfg.Width, cfg.Height, size, size)
+		if strings.EqualFold(filepath.Ext(entry.Name()), ".png") {
+			if err := validateRenderPNG(filepath.Join(stage, entry.Name()), size); err != nil {
+				return nil, err
 			}
 			foundPNG = true
 		}
 		files = append(files, entry.Name())
 	}
 	if !foundPNG {
-		return RenderResult{}, fmt.Errorf("export produced no PNG maps: %s", trimLog(out))
+		return nil, fmt.Errorf("export produced no PNG maps: %s", trimLog(output))
 	}
-	if afterExport != nil {
-		additional, err := afterExport(stage)
-		if err != nil {
-			return RenderResult{}, err
-		}
-		// The preview generator is internal and returns a single safe basename.
-		if additional != filepath.Base(additional) || !strings.HasSuffix(additional, ".png") {
-			return RenderResult{}, errors.New("invalid generated preview filename")
-		}
-		files = append(files, additional)
+	return files, nil
+}
+func validateRenderPNG(path string, size int) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
 	}
-	// Back up old exports before publishing, and restore them if publication fails.
-	dest := filepath.Join(generated, name)
+	cfg, decodeErr := png.DecodeConfig(f)
+	closeErr := f.Close()
+	if decodeErr != nil {
+		return fmt.Errorf("invalid PNG %q: %w", filepath.Base(path), decodeErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 {
+		return fmt.Errorf("invalid PNG %q", filepath.Base(path))
+	}
+	if cfg.Width != size || cfg.Height != size {
+		return fmt.Errorf("%s is %dx%d, expected %dx%d; this Material Maker version may ignore --size", filepath.Base(path), cfg.Width, cfg.Height, size, size)
+	}
+	return nil
+}
+func publishRender(generated, stage, name string, size int, files []string) (RenderResult, error) {
 	if err := material.ValidName(name); err != nil {
 		return RenderResult{}, err
 	}
+	dest := filepath.Join(generated, name)
 	if info, err := os.Lstat(dest); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return RenderResult{}, errors.New("refusing to replace symlinked material output")
 	}
@@ -183,7 +216,9 @@ func (r *Renderer) render(ctx context.Context, workspace *material.Workspace, na
 	}
 	if err := os.Rename(stage, dest); err != nil {
 		if previous {
-			_ = os.Rename(backup, dest)
+			if rollbackErr := os.Rename(backup, dest); rollbackErr != nil {
+				return RenderResult{}, errors.Join(err, fmt.Errorf("restoring previous render: %w", rollbackErr))
+			}
 		}
 		return RenderResult{}, err
 	}
@@ -193,8 +228,8 @@ func (r *Renderer) render(ctx context.Context, workspace *material.Workspace, na
 		}
 	}
 	paths := make([]string, len(files))
-	for i, f := range files {
-		paths[i] = filepath.Join(dest, f)
+	for i, file := range files {
+		paths[i] = filepath.Join(dest, file)
 	}
 	return RenderResult{Name: name, Files: paths, RequestedSize: size, Directory: dest}, nil
 }
@@ -279,7 +314,7 @@ func (r *Renderer) renderScreenshot(ctx context.Context, stage, name string) (st
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	img, err := png.Decode(f)
 	if err != nil {
 		return "", fmt.Errorf("preview screenshot is not a complete PNG: %w", err)

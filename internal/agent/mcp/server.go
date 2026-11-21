@@ -84,7 +84,7 @@ func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		if len(req.ID) == 0 {
 			continue
 		} // protocol notifications never receive a response
-		reply := s.Handle(ctx, req)
+		reply := s.handle(ctx, req)
 		if err := encode(writer, reply); err != nil {
 			return err
 		}
@@ -101,7 +101,7 @@ func encode(w *bufio.Writer, body response) error {
 	}
 	return w.Flush()
 }
-func (s *Server) Handle(ctx context.Context, r request) response {
+func (s *Server) handle(ctx context.Context, r request) response {
 	id := r.ID
 	if len(id) == 0 {
 		id = json.RawMessage("null")

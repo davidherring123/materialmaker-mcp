@@ -53,40 +53,53 @@ func LoadCatalog(dir string) (Catalog, error) {
 	catalog := Catalog{}
 	compounds := map[string]rawNode{}
 	for _, p := range paths {
-		data, err := os.ReadFile(p)
+		name, raw, err := readNodeDefinition(p)
 		if err != nil {
 			return nil, err
 		}
-		var raw rawNode
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("%s: %w", p, err)
-		}
-		name := strings.TrimSuffix(filepath.Base(p), ".mmg")
 		if raw.ShaderModel != nil {
-			definition := NodeType{Type: name, Inputs: []Port{}, Outputs: raw.ShaderModel.Outputs, Parameters: []Param{}}
-			repeat := raw.GenericSize
-			if repeat <= 0 {
-				repeat = 1
-			}
-			for _, input := range raw.ShaderModel.Inputs {
-				count := 1
-				if strings.Contains(input.Name, "#") {
-					count = repeat
-				}
-				for i := 0; i < count; i++ {
-					definition.Inputs = append(definition.Inputs, input)
-				}
-			}
-			for _, rawParam := range raw.ShaderModel.Parameters {
-				definition.Parameters = append(definition.Parameters, parseParam(rawParam))
-			}
-			catalog[name] = definition
-		} else if len(raw.Nodes) > 0 {
+			catalog[name] = parseShaderNode(name, raw)
+		}
+		if raw.ShaderModel == nil && len(raw.Nodes) > 0 {
 			compounds[name] = raw
 			catalog[name] = NodeType{Type: name, Inputs: []Port{}, Outputs: []Port{}, Parameters: []Param{}}
 		}
 	}
-	// Compound parameters can reference another compound. Resolve to a fixed point.
+	resolveCompounds(catalog, compounds)
+	return catalog, nil
+}
+func readNodeDefinition(path string) (string, rawNode, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", rawNode{}, err
+	}
+	var raw rawNode
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return "", rawNode{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return strings.TrimSuffix(filepath.Base(path), ".mmg"), raw, nil
+}
+func parseShaderNode(name string, raw rawNode) NodeType {
+	result := NodeType{Type: name, Inputs: []Port{}, Outputs: raw.ShaderModel.Outputs, Parameters: []Param{}}
+	repeat := raw.GenericSize
+	if repeat <= 0 {
+		repeat = 1
+	}
+	for _, input := range raw.ShaderModel.Inputs {
+		count := 1
+		if strings.Contains(input.Name, "#") {
+			count = repeat
+		}
+		for i := 0; i < count; i++ {
+			result.Inputs = append(result.Inputs, input)
+		}
+	}
+	for _, p := range raw.ShaderModel.Parameters {
+		result.Parameters = append(result.Parameters, parseParam(p))
+	}
+	return result
+}
+func resolveCompounds(catalog Catalog, compounds map[string]rawNode) {
 	for round := 0; round < 12; round++ {
 		changed := false
 		for _, name := range sortedKeys(compounds) {
@@ -102,7 +115,6 @@ func LoadCatalog(dir string) (Catalog, error) {
 			break
 		}
 	}
-	return catalog, nil
 }
 func sortedKeys(m map[string]rawNode) []string {
 	out := make([]string, 0, len(m))
@@ -123,12 +135,12 @@ func parseParam(p map[string]any) Param {
 			}
 		}
 		z := float64(0)
-		max := float64(len(out.Values) - 1)
-		if max < 0 {
-			max = 0
+		upper := float64(len(out.Values) - 1)
+		if upper < 0 {
+			upper = 0
 		}
 		out.Min = &z
-		out.Max = &max
+		out.Max = &upper
 	} else {
 		if v, ok := num(p["min"]); ok {
 			out.Min = &v
@@ -142,14 +154,14 @@ func parseParam(p map[string]any) Param {
 func parseCompound(name string, raw rawNode, catalog Catalog) NodeType {
 	out := NodeType{Type: name, Inputs: []Port{}, Outputs: []Port{}, Parameters: []Param{}}
 	for _, child := range raw.Nodes {
-		if str(child["type"]) == "ios" {
-			ports := readPorts(child["ports"])
-			switch str(child["name"]) {
-			case "gen_inputs":
-				out.Inputs = ports
-			case "gen_outputs":
-				out.Outputs = ports
-			}
+		if str(child["type"]) != "ios" {
+			continue
+		}
+		switch str(child["name"]) {
+		case "gen_inputs":
+			out.Inputs = readPorts(child["ports"])
+		case "gen_outputs":
+			out.Outputs = readPorts(child["ports"])
 		}
 	}
 	for _, child := range raw.Nodes {
@@ -167,46 +179,51 @@ func parseCompound(name string, raw rawNode, catalog Catalog) NodeType {
 			if pname == "" {
 				continue
 			}
-			param := Param{Name: pname}
-			if def, ok := defaults[pname]; ok {
-				param.Default = def
-			}
-			if min, ok := num(widget["min"]); ok {
-				param.Min = &min
-				param.Type = "float"
-			}
-			if max, ok := num(widget["max"]); ok {
-				param.Max = &max
-			}
-			if links, ok := widget["linked_widgets"].([]any); ok && len(links) > 0 {
-				if link, ok := links[0].(map[string]any); ok {
-					for _, inner := range raw.Nodes {
-						if str(inner["name"]) != str(link["node"]) {
-							continue
-						}
-						t := str(inner["type"])
-						if spec, ok := catalog[t]; ok {
-							for _, p := range spec.Parameters {
-								if p.Name == str(link["widget"]) {
-									param.Type = p.Type
-									param.Min = p.Min
-									param.Max = p.Max
-									param.Values = p.Values
-									if param.Default == nil {
-										param.Default = p.Default
-									}
-									break
-								}
-							}
-						}
-						break
-					}
-				}
-			}
-			out.Parameters = append(out.Parameters, param)
+			out.Parameters = append(out.Parameters, parseCompoundParameter(pname, widget, defaults, raw.Nodes, catalog))
 		}
 	}
 	return out
+}
+func parseCompoundParameter(name string, widget, defaults map[string]any, children []map[string]any, catalog Catalog) Param {
+	param := Param{Name: name}
+	if def, ok := defaults[name]; ok {
+		param.Default = def
+	}
+	if minimum, ok := num(widget["min"]); ok {
+		param.Min = &minimum
+		param.Type = "float"
+	}
+	if maximum, ok := num(widget["max"]); ok {
+		param.Max = &maximum
+	}
+	links, ok := widget["linked_widgets"].([]any)
+	if !ok || len(links) == 0 {
+		return param
+	}
+	link, ok := links[0].(map[string]any)
+	if !ok {
+		return param
+	}
+	for _, child := range children {
+		if str(child["name"]) != str(link["node"]) {
+			continue
+		}
+		for _, candidate := range catalog[str(child["type"])].Parameters {
+			if candidate.Name != str(link["widget"]) {
+				continue
+			}
+			param.Type = candidate.Type
+			param.Min = candidate.Min
+			param.Max = candidate.Max
+			param.Values = candidate.Values
+			if param.Default == nil {
+				param.Default = candidate.Default
+			}
+			break
+		}
+		break
+	}
+	return param
 }
 func readPorts(value any) []Port {
 	out := []Port{}
